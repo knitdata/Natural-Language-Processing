@@ -1,0 +1,248 @@
+---
+title: "STAT 653 HW2"
+author: ' Min Tamang, ug5773'
+date: "04/05/2020"
+output:
+  word_document: default
+  pdf_document: default
+  html_notebook: default
+---
+
+## Run the R code from Chapter 2
+```{r}
+library(tidytext)
+library(textdata)
+```
+
+
+**Lexicons**
+```{r}
+# see sentiment lexicons
+head(get_sentiments("afinn"))
+tail(get_sentiments("bing"))
+head(get_sentiments("nrc"))
+
+```
+
+
+**Connect Tidytext with Lexicons**
+```{r}
+# First, convert books to tidy format-one words per row
+library(janeaustenr)
+library(dplyr)
+library(stringr)
+tidy_books <- austen_books() %>%
+  group_by(book) %>%
+  mutate(linenumber = row_number(),
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", 
+                                                 ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  unnest_tokens(word, text)
+head(tidy_books)
+```
+
+```{r}
+# Filter joy from NRC lexicon 
+nrc_joy <- get_sentiments("nrc") %>% filter(sentiment == "joy")
+head(nrc_joy)
+
+```
+
+```{r}
+# sentiment analysis of Emma
+sentiment_emma <- tidy_books %>% filter( book == "Emma") %>%inner_join(nrc_joy) %>% count(word,sort = TRUE )
+top_n(sentiment_emma,15)
+```
+
+```{r}
+library(tidyr)
+# try with bing lexicon
+jane_austen_sentiment <- tidy_books %>% inner_join(get_sentiments("bing")) %>%
+  count(book, index = linenumber %/%80, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive - negative)
+tail(jane_austen_sentiment)
+```
+
+```{r}
+library(tidyverse)
+#plot sentiment scores
+ggplot(jane_austen_sentiment, aes(index, sentiment, fill = book))  +
+  geom_col(show.legend = FALSE) + facet_wrap(~book, scales = "free_x") +   ggtitle("Sentiment through the narratives of Jane Austen's novels")
+```
+
+**Comparing the three sentiment dictionaries**
+
+```{r}
+# pride and prejudice
+pride_prejudice <- tidy_books %>% filter(book =="Pride & Prejudice")
+tail(pride_prejudice)
+```
+```{r}
+# try all 3 lexicons
+# affin - numeric scores
+afinn <- pride_prejudice %>% inner_join(get_sentiments("afinn")) %>%
+  group_by(index = linenumber %/% 80) %>% summarise(sentiment = sum(value)) %>% mutate(method = "AFINN")
+# bing and nrc- binary
+bing_and_nrc <- bind_rows(pride_prejudice %>% 
+                          inner_join(get_sentiments("bing")) %>%
+                          mutate(method = "Bing et al."),
+                          pride_prejudice %>% 
+                          inner_join(get_sentiments("nrc") %>% 
+                          filter(sentiment %in% c("positive",                                          "negative"))) %>%
+                          mutate(method = "NRC")) %>%
+  count(method, index = linenumber %/% 80, sentiment) %>%
+  spread(sentiment, n, fill = 0) %>%
+  mutate(sentiment = positive-negative)
+#combine net sentiments and plot
+bind_rows(afinn, bing_and_nrc) %>% ggplot(aes(index,sentiment,fill = method)) + geom_col(show.legend = F) + facet_wrap(~method, ncol = 1, scales = "free_y") + labs(caption = "Figure: Comparing three sentiment lexicons usung Pride and Prejudice") + theme(plot.caption = element_text(hjust=0.5, size=rel(1.2)))
+```
+
+
+```{r}
+# see total negative and positive words per bing and nrc
+get_sentiments("nrc") %>% filter(sentiment %in% c("positive","negative")) %>%
+  count(sentiment)
+get_sentiments("bing") %>% count(sentiment)
+```
+
+**Most common positive and negative words**
+```{r}
+#bing
+bing_word_counts <- tidy_books %>% inner_join(get_sentiments("bing"))%>% count(word, sentiment, sort = T) %>% ungroup()
+top_n(bing_word_counts,10)
+
+```
+
+```{r}
+bing_word_counts %>% group_by(sentiment) %>% top_n(10) %>% ungroup() %>%
+  mutate(word = reorder(word,n)) %>% 
+  ggplot(aes(word,n, fill = sentiment)) %>%  + geom_col(show.legend = F) +
+  facet_wrap(~sentiment, scales = "free_y") + labs(y ="Contribution to sentiment") + coord_flip()
+```
+
+```{r}
+# add "miss" to a custom stop-words
+custom_stop_words <- bind_rows(tibble(word = c("miss"), lexicon = c("custom")), stop_words)
+head(custom_stop_words)
+```
+
+**Wordclouds**
+```{r}
+library(wordcloud)
+tidy_books %>% anti_join(stop_words) %>% count(word) %>%
+  with(wordcloud(word,n,max.words = 100))
+```
+
+
+```{r}
+#compare and separate negative and positive words
+library(reshape2)
+tidy_books %>% inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort = T) %>% acast(word~sentiment, value.var = "n", fill = 0) %>% comparison.cloud(colors = c("lightgreen","lightblue"), max.words = 100)
+```
+
+
+```{r}
+#looking into sentences
+PandP_sentences <- tibble(text = prideprejudice) %>%
+  unnest_tokens(sentence, text, token = "sentences")
+PandP_sentences$sentence[2]
+```
+
+
+```{r}
+# by chapter
+austen_chapters <- austen_books() %>%
+  group_by(book) %>%
+  unnest_tokens(chapter, text, token = "regex", 
+  pattern = "Chapter|CHAPTER [\\dIVXLC]") %>% ungroup()
+
+austen_chapters %>% 
+  group_by(book) %>% 
+  summarise(chapters = n())
+```
+
+```{r}
+# see negative chapters
+bingnegative <- get_sentiments("bing") %>% 
+  filter(sentiment == "negative")
+
+wordcounts <- tidy_books %>%
+  group_by(book, chapter) %>%
+  summarize(words = n())
+
+tidy_books %>%
+  semi_join(bingnegative) %>%
+  group_by(book, chapter) %>%
+  summarize(negativewords = n()) %>%
+  left_join(wordcounts, by = c("book", "chapter")) %>%
+  mutate(ratio = negativewords/words) %>%
+  filter(chapter != 0) %>%
+  top_n(1) %>%
+  ungroup()
+```
+
+
+## Try out the sentimentr package on a set of Tweets you find on Twitter. Just use the Twitter Search.
+
+```{r}
+library(sentimentr)
+vegan_tweets <- c('The dairy industry takes babies from their mums and kills them.Go #Vegan.Never pay a penny for cruelty.', '#Vegan because pain is pain no matter how small you are!', 'This is such a sad image. If this were a dog instead of a pig, people would lose their shit','Cows have favorite friends and become stressed when they are separated, cows are curious creatures, cows are very social, cows do not deserve what humanity does to them.Stop Supporting Animal Cruelty GoVegan', 'Millie is just one more #dairy cow that never saw her baby again Pensive faceshe was exploited and then slaughtered. Her entire short life was based on PAIN and GRIEF. This was all for milk in the coffee and cheese in a sandwich. End speciesism now. Choose #plantbased #vegan', 'Eating animals has caused massive animal suffering, global warming, and even a global pandemic. Grateful for people who have already made the switch. Folded hands If you’re not #vegan yet, what’s stopping you?', 'GOING #VEGAN SAVES NEARLY 200 ANIMALS A YEAR!', 'I never liked the thought of eating animals since childhood so became vegetarian in teens despite parents telling me I would become nutritionally deficient but even then I never realized the cruelty in dairy & eggs. Once aware I became #vegan', 'This is how orcas should be appreciated!!! FREE!!Water waveWhaleSmiling face with heart-shaped eyes In the wild, orcas can swim up to 100 miles per day Boycott marine parks, aquariums, etc. Reject animal exploitation, animals donot belong in captivity for human entertainment,they are not for us #Vegan #TheLockdown', 'Someone at a college, a college professor, complained to the administration about my suggestion at the blasphemous idea that being #plantbased #vegan may help immunity and that in a vegan world, #coronavirus may not even exist. And to the good professor, I would say I am sorry so sorry that world is not #vegan. So sorry that people continue to drink, smoke, and have poor health, 97% donot reach the minimum RDA of fibre, 80% donot even get their phytonutrients, and we live in such an unhealthy world that immune systems are shit. Really sorry.')
+
+```
+
+```{r}
+# by sentence
+vegan_tweets <- get_sentences(vegan_tweets)
+sentiment(vegan_tweets)
+# by group
+sentiment_by(vegan_tweets)
+```
+
+```{r}
+#profanity
+profanity(vegan_tweets)
+profanity_by(vegan_tweets)
+
+#emotion
+head(emotion_by(vegan_tweets))
+```
+
+
+```{r}
+#Highlight positive/negative sentences as an HTML document
+sentiment_by_vegan <- sentiment_by(vegan_tweets)
+highlight(sentiment_by_vegan)
+
+#Extract sentence level sentiment
+uncombine(sentiment_by_vegan)
+```
+
+
+
+
+```{r}
+social_distancing <- c('my social skills have gotten so bad since social distancing that now I just reply to every text I get with hahahaha', 'Top public health official says number of dead could be lower as Americans practice social distancing', 'The model the White House trotted out last week assumed full social distancing from the beginning--lockdowns, school/business closures, travel restrictions, etc. This whole the models were not wrong dog aint gonna hunt.', 'Wash your hands frequently.Maintain social distancing. Cover your mouth with your elbow to avoid droplets of saliva to people around you #covid-19', 'I was verbally attacked on the bus after a gruelling shift working in the frontline of the NHS I tried my best to observe social distancing. A passenger shouts at me with hostility & I had to disembark out of fear. We are all anxious but we must still be respectful to each other', 'My Dad works at a detention centre in London. No windows or air, staff aren’t being provided with masks, and his colleagues are not practicing social distancing. My family and I are so scared for him (he’s at risk) but he says he can’t afford to not work. I don’t know what to do.', 'My first day working from home and this is my basement setup. This is how #SocialDistancing looks—what it takes to #FlattenTheCurve. We’re all in this together, folks. Stay strong! ', 'We are keeping our parks open. Though, I have advised our park rangers that if individuals are not engaging in #socialdistancing, they have the power to close the park.If a park is crowded, please go to another park','We hope you are staying safe during this crazy time. While we are all practicing social distancing, we will be sharing a few dental tips and reminders to keep you and your teeth healthy. Starting with the proper way to brush your teeth.','Social Distancing does not mean we can not stay connected. Pick up the phone and call a friend or loved one. Have a video chat with friends or family. We are all in this together.' )
+```
+
+```{r}
+# by sentence
+social_distancing <- get_sentences(social_distancing)
+sentiment(social_distancing)
+# by group
+sentiment_by(social_distancing)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

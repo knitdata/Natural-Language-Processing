@@ -1,0 +1,411 @@
+---
+title: "STAT 653 HW4"
+author: " Min Tamang, ug5773"
+date: " 04/19/2020"
+output: html_notebook
+---
+
+
+# Converting to and from non-tidy formats {#dtm}
+
+```{r echo = FALSE}
+library(knitr)
+opts_chunk$set(message = FALSE, warning = FALSE, cache = TRUE)
+options(width = 100, dplyr.width = 150)
+library(ggplot2)
+library(methods)
+theme_set(theme_light())
+library(purrr)
+```
+
+
+
+### Tidying DocumentTermMatrix objects
+
+```{r}
+#collection of AP newspaper articles from topicmodels package
+library(tm)
+data("AssociatedPress", package = "topicmodels")
+AssociatedPress
+```
+
+
+```{r}
+#access terms 
+terms <- Terms(AssociatedPress)
+head(terms)
+```
+
+
+```{r}
+#convert to tidy data with tidy() function from broom package
+library(broom)
+library(dplyr)
+library(tidytext)
+
+ap_td <- tidy(AssociatedPress)
+ap_td
+```
+
+
+```{r}
+# join with bing lexicon
+ap_sentiments <- ap_td %>%
+  inner_join(get_sentiments("bing"), by = c(term = "word"))
+ap_sentiments
+```
+
+
+```{r}
+#visualize words contributing to positive and negative sentiment
+library(ggplot2)
+ap_sentiments %>%
+  count(sentiment, term, wt = count) %>%
+  ungroup() %>%
+  filter(n >= 200) %>%
+  mutate(n = ifelse(sentiment == "negative", -n, n)) %>%
+  mutate(term = reorder(term, n)) %>%
+  ggplot(aes(term, n, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  ylab("Contribution to sentiment") +
+  coord_flip()
+```
+
+
+### Tidying dfm objects
+
+```{r}
+#presidential inauguration speeches from quanteda package
+data("data_corpus_inaugural", package = "quanteda")
+inaug_dfm <- quanteda::dfm(data_corpus_inaugural, verbose = FALSE)
+inaug_dfm
+```
+
+
+```{r}
+#tidy format
+inaug_td <- tidy(inaug_dfm)
+inaug_td
+```
+
+
+```{r}
+#tf_idf
+inaug_tf_idf <- inaug_td %>%
+  bind_tf_idf(term, document, count) %>%
+  arrange(desc(tf_idf))
+
+inaug_tf_idf
+```
+
+
+```{r}
+#pick four notable inaugural addresses
+speeches <- c("1933-Roosevelt", "1861-Lincoln",
+              "1961-Kennedy", "2009-Obama")
+inaug_tf_idf %>%
+  filter(document %in% speeches) %>%
+  group_by(document) %>%
+  top_n(10, tf_idf) %>%
+  ungroup() %>%
+  mutate(term = reorder_within(term, tf_idf, document)) %>%
+  ggplot(aes(term, tf_idf, fill = document)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ document, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(x = "",
+       y = "tf-idf")
+```
+
+```{r}
+#extract year and compute the total words within each year
+library(tidyr)
+year_term_counts <- inaug_td %>%
+  extract(document, "year", "(\\d+)", convert = TRUE) %>%
+  complete(year, term, fill = list(count = 0)) %>%
+  group_by(year) %>%
+  mutate(year_total = sum(count))
+```
+
+
+```{r}
+# see use of words over time 
+year_term_counts %>%
+  filter(term %in% c("god", "america", "foreign", "union", "constitution", "freedom")) %>%
+  ggplot(aes(year, count / year_total)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~ term, scales = "free_y") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  ylab("% frequency of word in inaugural address")
+```
+
+
+## Casting tidy text data into a matrix 
+
+
+```{r}
+#cast tidy data back to document-term matrix
+ap_td %>%
+  cast_dtm(document, term, count)
+```
+
+```{r}
+#cast the table into dfm object
+ap_td %>%
+  cast_dfm(document, term, count)
+```
+
+
+```{r}
+library(Matrix)
+# cast into a Matrix object
+m <- ap_td %>%
+  cast_sparse(document, term, count)
+
+class(m)
+dim(m)
+```
+
+
+```{r}
+# create a DTM of Jane Austen's books
+library(janeaustenr)
+
+austen_dtm <- austen_books() %>%
+  unnest_tokens(word, text) %>%
+  count(book, word) %>%
+  cast_dtm(book, word, n)
+
+austen_dtm
+```
+
+
+## Tidying corpus objects with metadata
+
+```{r}
+# acq corpus from tm that contains Reuter articles 
+data("acq")
+acq
+
+# first document
+acq[[1]]
+```
+
+
+```{r}
+# tidy document 
+acq_td <- tidy(acq)
+acq_td
+```
+
+
+```{r}
+#separate words and remove stop words
+acq_tokens <- acq_td %>%
+  select(-places) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words, by = "word")
+acq_tokens
+# most common words
+acq_tokens %>%
+  count(word, sort = TRUE)
+
+# tf-idf
+acq_tokens %>%
+  count(id, word) %>%
+  bind_tf_idf(word, id, n) %>%
+  arrange(desc(tf_idf))
+```
+
+
+### Example: mining financial articles {#financial}
+
+`Corpus` objects are a common output format for data ingesting packages, which means the `tidy()` function gives us access to a wide variety of text data. One example is [tm.plugin.webmining](https://cran.r-project.org/package=tm.plugin.webmining), which connects to online feeds to retrieve news articles based on a keyword. For instance, performing `WebCorpus(GoogleFinanceSource("NASDAQ:MSFT"))` allows us to retrieve the 20 most recent articles related to the Microsoft (MSFT) stock.
+
+Here we'll retrieve recent articles relevant to nine major technology stocks: Microsoft, Apple, Google, Amazon, Facebook, Twitter, IBM, Yahoo, and Netflix.
+
+```{block, type = "rmdnote"}
+These results were downloaded in January 2017, when this chapter was written, but you'll certainly find different results if you ran it for yourself. Note that this code takes several minutes to run.
+```
+
+```{r stock_articles_run, eval = FALSE}
+library(tm.plugin.webmining)
+library(purrr)
+
+company <- c("Microsoft", "Apple", "Google", "Amazon", "Facebook",
+             "Twitter", "IBM", "Yahoo", "Netflix")
+symbol <- c("MSFT", "AAPL", "GOOG", "AMZN", "FB", "TWTR", "IBM", "YHOO", "NFLX")
+
+download_articles <- function(symbol) {
+  WebCorpus(GoogleFinanceSource(paste0("NASDAQ:", symbol)))
+}
+
+stock_articles <- tibble(company = company,
+                             symbol = symbol) %>%
+  mutate(corpus = map(symbol, download_articles))
+```
+
+This uses the `map()` function from the purrr package, which applies a function to each item in `symbol` to create a list, which we store in the `corpus` list column.
+
+```{r stock_articles, echo = FALSE}
+load("data/stock_articles.rda")
+```
+
+```{r dependson = "stock_articles"}
+stock_articles
+```
+
+Each of the items in the `corpus` list column is a `WebCorpus` object, which is a special case of a corpus like `acq`. We can thus turn each into a data frame using the `tidy()` function, unnest it with tidyr's `unnest()`, then tokenize the `text` column of the individual articles using `unnest_tokens()`.
+
+```{r stock_tokens, dependson = "stock_articles"}
+stock_tokens <- stock_articles %>%
+  mutate(corpus = map(corpus, tidy)) %>%
+  unnest(cols = (corpus)) %>%
+  unnest_tokens(word, text) %>%
+  select(company, datetimestamp, word, id, heading)
+
+stock_tokens
+```
+
+Here we see some of each article's metadata alongside the words used. We could use tf-idf to determine which words were most specific to each stock symbol.
+
+```{r stocktfidfdata, dependson="stock_tokens"}
+library(stringr)
+
+stock_tf_idf <- stock_tokens %>%
+  count(company, word) %>%
+  filter(!str_detect(word, "\\d+")) %>%
+  bind_tf_idf(word, company, n) %>%
+  arrange(-tf_idf)
+```
+
+The top terms for each are visualized in Figure \@ref(fig:stocktfidf). As we'd expect, the company's name and symbol are typically included, but so are several of their product offerings and executives, as well as companies they are making deals with (such as Disney with Netflix).
+
+```{r stocktfidf, dependson = "stocktfidfdata", echo = FALSE, fig.cap = "The 8 words with the highest tf-idf in recent articles specific to each company", fig.height = 8, fig.width = 8}
+stock_tf_idf %>%
+  group_by(company) %>%
+  top_n(8, tf_idf) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = company)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ company, scales = "free") +
+  coord_flip() +
+  labs(x = "Word",
+       y = "tf-idf")
+```
+
+If we were interested in using recent news to analyze the market and make investment decisions, we'd likely want to use sentiment analysis to determine whether the news coverage was positive or negative. Before we run such an analysis, we should look at what words would contribute the most to positive and negative sentiments, as was shown in Chapter \@ref(most-positive-negative). For example, we could examine this within the AFINN lexicon (Figure \@ref(fig:stockafinn)).
+
+```{r eval=FALSE}
+stock_tokens %>%
+  anti_join(stop_words, by = "word") %>%
+  count(word, id, sort = TRUE) %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%
+  group_by(word) %>%
+  summarize(contribution = sum(n * value)) %>%
+  top_n(12, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution)) +
+  geom_col() +
+  coord_flip() +
+  labs(y = "Frequency of word * AFINN value")
+```
+
+
+```{r stockafinn, dependson = "stock_articles", echo=FALSE, fig.cap = "The words with the largest contribution to sentiment values in recent financial articles, according to the AFINN dictionary. The 'contribution' is the product of the word and the sentiment score."}
+load("data/afinn.rda")
+stock_tokens %>%
+  anti_join(stop_words, by = "word") %>%
+  count(word, id, sort = TRUE) %>%
+  inner_join(afinn, by = "word") %>%
+  group_by(word) %>%
+  summarize(contribution = sum(n * value)) %>%
+  top_n(12, abs(contribution)) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(word, contribution)) +
+  geom_col() +
+  coord_flip() +
+  labs(y = "Frequency of word * AFINN value")
+```
+
+In the context of these financial articles, there are a few big red flags here. The words "share" and "shares" are counted as positive verbs by the AFINN lexicon ("Alice will **share** her cake with Bob"), but they're actually neutral nouns ("The stock price is $12 per **share**") that could just as easily be in a positive sentence as a negative one. The word "fool" is even more deceptive: it refers to Motley Fool, a financial services company. In short, we can see that the AFINN sentiment lexicon is entirely unsuited to the context of financial data (as are the NRC and Bing lexicons).
+
+Instead, we introduce another sentiment lexicon: the Loughran and McDonald dictionary of financial sentiment terms [@loughran2011liability]. This dictionary was developed based on analyses of financial reports, and intentionally avoids words like "share" and "fool", as well as subtler terms like "liability" and "risk" that may not have a negative meaning in a financial context.
+
+The Loughran data divides words into six sentiments: "positive", "negative", "litigious", "uncertain", "constraining", and "superfluous". We could start by examining the most common words belonging to each sentiment within this text dataset.
+
+```{r eval=FALSE}
+stock_tokens %>%
+  count(word) %>%
+  inner_join(get_sentiments("loughran"), by = "word") %>%
+  group_by(sentiment) %>%
+  top_n(5, n) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ sentiment, scales = "free") +
+  ylab("Frequency of this word in the recent financial articles")
+```
+
+
+```{r stockloughransentiments, echo = FALSE, fig.cap = "The most common words in the financial news articles associated with each of the six sentiments in the Loughran and McDonald lexicon"}
+load("data/loughran.rda")
+stock_tokens %>%
+  count(word) %>%
+  inner_join(loughran, by = "word") %>%
+  group_by(sentiment) %>%
+  top_n(5, n) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ sentiment, scales = "free") +
+  ylab("Frequency of this word in the recent financial articles")
+```
+
+These assignments (Figure \@ref(fig:stockloughransentiments)) of words to sentiments look more reasonable: common positive words include "strong" and "better", but not "shares" or "growth", while negative words include "volatility" but not "fool". The other sentiments look reasonable as well: the most common "uncertainty" terms include "could" and "may".
+
+Now that we know we can trust the dictionary to approximate the articles' sentiments, we can use our typical methods for counting the number of uses of each sentiment-associated word in each corpus.
+
+```{r eval=FALSE}
+stock_sentiment_count <- stock_tokens %>%
+  inner_join(get_sentiments("loughran"), by = "word") %>%
+  count(sentiment, company) %>%
+  spread(sentiment, n, fill = 0)
+
+stock_sentiment_count
+```
+
+```{r echo=FALSE}
+stock_sentiment_count <- stock_tokens %>%
+  inner_join(loughran, by = "word") %>%
+  count(sentiment, company) %>%
+  spread(sentiment, n, fill = 0)
+
+stock_sentiment_count
+```
+
+It might be interesting to examine which company has the most news with "litigious" or "uncertain" terms. But the simplest measure, much as it was for most analysis in Chapter \@ref(sentiment), is to see whether the news is more positive or negative. As a general quantitative measure of sentiment, we'll use "(positive - negative) / (positive + negative)" (Figure \@ref(fig:stockpositivity)).
+
+```{r stockpositivity, fig.cap = "\"Positivity\" of the news coverage around each stock in January 2017, calculated as (positive - negative) / (positive + negative), based on uses of positive and negative words in 20 recent news articles about each company"}
+stock_sentiment_count %>%
+  mutate(score = (positive - negative) / (positive + negative)) %>%
+  mutate(company = reorder(company, score)) %>%
+  ggplot(aes(company, score, fill = score > 0)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  labs(x = "Company",
+       y = "Positivity score among 20 recent news articles")
+```
+
+Based on this analysis, we'd say that in January 2017 most of the coverage of Yahoo and Twitter was strongly negative, while coverage of Google and Amazon was the most positive. A glance at current financial headlines suggest that it's on the right track. If you were interested in further analysis, you could use one of R's many quantitative finance packages to compare these articles to recent stock prices and other metrics.
+
+## Summary
+
+Text analysis requires working with a variety of tools, many of which have inputs and outputs that aren't in a tidy form. This chapter showed how to convert between a tidy text data frame and sparse document-term matrices, as well as how to tidy a Corpus object containing document metadata. The next chapter will demonstrate another notable example of a package, topicmodels, that requires a document-term matrix as input, showing that these conversion tools are an essential part of text analysis.

@@ -1,0 +1,321 @@
+---
+title: "STAT 653, HW5"
+author: " Min Tamang, ug5773"
+date : " 05/02/2020"
+output: html_notebook
+---
+
+**Run the R code from Chapter 6**
+
+## Topic modeling 
+
+**6.1 Latent Dirishlet Allocation**
+```{r}
+#2246 news articcles from AP
+library(topicmodels)
+data("AssociatedPress")
+AssociatedPress
+```
+
+```{r}
+# create a two-topic LDA model, set a seed
+ap_lda <- LDA(AssociatedPress, k = 2, control = list(seed = 1234))
+ap_lda
+```
+
+
+**6.1.1 Word-topic probabilities**
+
+```{r}
+#per-topic-per-word probabilities: beta
+library(tidytext)
+ap_topics <- tidy(ap_lda)
+ap_topics
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+#top 10 terms from each topic
+ap_top_terms <- ap_topics %>% group_by(topic) %>%
+  top_n(10, beta) %>% ungroup()%>%
+  arrange(topic,desc(beta))
+ap_top_terms
+
+```
+
+```{r}
+#visualize
+ap_top_terms %>% mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) + 
+  geom_col(show.legend = F) + 
+  facet_wrap(~topic, scales = "free") + coord_flip() + scale_x_reordered()
+```
+
+```{r}
+library(tidyr)
+# calculate log ratio of beta to see spread of probabilities
+beta_spread <- ap_topics %>% mutate(topic = paste0("topic",topic)) %>%
+  spread(topic, beta) %>%
+  filter(topic1>0.001|topic2 >0.001) %>%
+  mutate(log_ratio = log(topic2/topic1))
+beta_spread
+  
+```
+
+```{r}
+beta_spread %>%
+  group_by(direction = log_ratio > 0) %>%
+  top_n(10, abs(log_ratio)) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, log_ratio)) %>%
+  ggplot(aes(term, log_ratio)) +
+  geom_col() +
+  labs(y = "Log2 ratio of beta in topic 2 / topic 1") +
+  coord_flip()
+```
+
+**6.1.2 Document-topic probabilities**
+
+
+```{r}
+# per-document-per-topic probabilities: gamma 
+ap_documents <- tidy(ap_lda, matrix = "gamma")
+ap_documents
+```
+
+
+
+```{r}
+# document 6 is almost entirely from topic 2, see most common words
+tidy(AssociatedPress) %>% filter(document == 6) %>%
+  arrange(-count)
+```
+
+
+
+
+```{r}
+# document 19 is almost entirely from topic 1, see most common words
+tidy(AssociatedPress) %>% filter(document == 19) %>%
+  arrange(-count)
+```
+
+
+**6.2 Example: the great library heist- where we know the right answer**
+
+
+```{r}
+# four books four topic models
+titles <- c("Twenty Thousand Leagues under the Sea", "The War of the Worlds", "Pride and Prejudice", "Great Expectations")
+```
+
+```{r}
+# retrieve books from gutenbergr
+library(gutenbergr)
+books <- gutenberg_works(title%in% titles) %>% gutenberg_download(meta_fields = "title")
+books
+```
+
+
+```{r}
+library(stringr)
+# divide into documents, each representing one chapter
+by_chapter <- books %>%
+  group_by(title) %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter ", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%
+  unite(document, title, chapter)
+
+# split into words
+by_chapter_word <- by_chapter %>%
+  unnest_tokens(word, text)
+
+# find document-word counts
+word_counts <- by_chapter_word %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+
+word_counts
+```
+
+
+**6.2.1 LDA on chapters**
+
+```{r}
+# convert tidy data to document term matrix
+chapters_dtm <- word_counts %>% cast_dtm(document, word, n)
+chapters_dtm
+
+```
+
+
+```{r}
+# create topic model with LDA function for four books, k = 4
+chapters_lda <- LDA(chapters_dtm, k = 4, control = list(seed = 1234))
+chapters_lda
+```
+
+
+```{r}
+#per-topic-per-word probabilities
+chapter_topics <- tidy(chapters_lda, matrix = "beta")
+chapter_topics
+                       
+```
+
+
+
+```{r}
+# top 10 terms in each topic
+top_terms <- chapter_topics %>% group_by(topic) %>%
+  top_n(10, beta) %>% ungroup() %>%
+  arrange(topic, -beta)
+top_terms
+```
+
+```{r}
+#visualize
+library(ggplot2)
+top_terms %>% mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = F) + facet_wrap(~topic, scales = "free") +
+  coord_flip() + scale_x_reordered()
+```
+
+**6.2.2 Per-document classification**
+
+```{r}
+#per-document-per-topic probabilities
+chapters_gamma <- tidy(chapters_lda, matrix = "gamma")
+chapters_gamma
+                       
+```
+
+
+```{r}
+#separate out chapter and title
+chapters_gamma <- chapters_gamma %>%
+  separate(document, c("title", "chapter"), sep= "_", convert = TRUE)
+chapters_gamma
+```
+
+
+```{r}
+# reorder titles and plot
+chapters_gamma %>% mutate(title = reorder(title, gamma*topic)) %>%
+  ggplot(aes(factor(topic),gamma)) + geom_boxplot() + facet_wrap(~title)
+```
+
+
+
+
+```{r}
+#topic most associated with a chapter 
+chapter_classifications <- chapters_gamma %>%
+  group_by(title, chapter) %>% top_n(1, gamma) %>%
+  ungroup()
+chapter_classifications
+```
+
+
+
+```{r}
+#misidentified topics
+book_topics <- chapter_classifications %>% count(title, topic) %>%
+  group_by(title) %>% top_n(1,n) %>% ungroup() %>%
+  transmute(consensus = title, topic)
+chapter_classifications %>% inner_join(book_topics, by = "topic") %>%
+  filter(title != consensus)
+```
+
+
+**6.2.3 By word assignments: augment**
+
+```{r}
+# see which words are assigned to which topic with augment function
+assignments <- augment(chapters_lda, data = chapters_dtm)
+assignments
+```
+
+
+```{r}
+# combine assignments with actual book titles to find incorrect classification
+assignments <- assignments %>% 
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)%>%
+  inner_join(book_topics, by = c(".topic" = "topic"))
+assignments
+```
+
+
+```{r}
+#visualize a confusion matrix
+library(scales)
+assignments %>%
+count(title, consensus, wt = count) %>%
+group_by(title) %>%
+mutate(percent = n / sum(n)) %>%
+ggplot(aes(consensus, title, fill = percent)) +
+geom_tile() +
+scale_fill_gradient2(high = "red", label = percent_format()) +
+theme_minimal() +
+theme(axis.text.x = element_text(angle = 90, hjust = 1),
+panel.grid = element_blank()) +
+labs(x = "Book words were assigned to",
+y = "Book words came from",
+fill = "% of assignments")
+
+```
+
+
+```{r}
+# most commonly mistaken words
+wrong_words <- assignments %>% filter(title!= consensus)
+wrong_words
+```
+
+```{r}
+wrong_words %>% count(title, consensus, term , wt = count) %>% 
+  ungroup() %>% arrange(-n)
+```
+
+
+
+```{r}
+# wrongly classified word, eg "flopson"
+word_counts %>% filter(word == "flopson")
+```
+
+
+**6.3 Alternative LDA implementations**
+
+```{r}
+library(mallet)
+# create a vector with one string per chapter
+collapsed <- by_chapter_word %>%
+anti_join(stop_words, by = "word") %>%
+mutate(word = str_replace(word, "'", "")) %>%
+group_by(document) %>%
+summarize(text = paste(word, collapse = " "))
+# create an empty file of "stop words"
+file.create(empty_file <- tempfile())
+docs <- mallet.import(collapsed$document, collapsed$text, empty_file)
+mallet_model <- MalletLDA(num.topics = 4)
+mallet_model$loadDocuments(docs)
+mallet_model$train(100)
+```
+
+
+```{r}
+#word-topic pairs
+tidy(mallet_model)
+# document-topic pairs
+tidy(mallet_model, matrix = "gamma")
+# column needs to be named "term" for "augment"
+term_counts <- rename(word_counts, term = word)
+augment(mallet_model, term_counts)
+```
+
+
